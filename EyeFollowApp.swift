@@ -181,12 +181,40 @@ struct FixedIrisPupil: View {
     let pupilOffset: CGPoint
 
     var body: some View {
+        let irisColor = Color(red: 0.75, green: 0.05, blue: 0.05)
+        let outerRingWidth = irisSize * 0.08
+        let innerRingWidth = irisSize * 0.03
+        let innerRingScale: CGFloat = 0.6
+        let tomoeRadius = irisSize * 0.28
+        let tomoeRotation = Angle.degrees(10)
+
         ZStack {
-            // iris çok az hareket eder
-            Circle()
-                .fill(Color.blue.opacity(0.9))
-                .frame(width: irisSize, height: irisSize)
-                .offset(x: irisOffset.x, y: irisOffset.y)
+            ZStack {
+                // Sharingan iris
+                Circle()
+                    .fill(irisColor)
+                    .frame(width: irisSize, height: irisSize)
+
+                Circle()
+                    .strokeBorder(Color.black, lineWidth: outerRingWidth)
+                    .frame(width: irisSize, height: irisSize)
+
+                Circle()
+                    .strokeBorder(Color.black.opacity(0.85), lineWidth: innerRingWidth)
+                    .frame(width: irisSize, height: irisSize)
+                    .scaleEffect(innerRingScale)
+
+                ForEach(0..<3, id: \.self) { i in
+                    ZStack {
+                        Tomoe(irisSize: irisSize, color: .black)
+                            .offset(y: -tomoeRadius)
+                    }
+                    .rotationEffect(Angle.degrees(Double(i) * 120) + tomoeRotation)
+                }
+            }
+            .frame(width: irisSize, height: irisSize)
+            .clipShape(Circle())
+            .offset(x: irisOffset.x, y: irisOffset.y)
 
             // pupil daha fazla hareket eder
             Circle()
@@ -203,6 +231,29 @@ struct FixedIrisPupil: View {
                     x: irisOffset.x + pupilOffset.x - irisSize * 0.18,
                     y: irisOffset.y + pupilOffset.y - irisSize * 0.18
                 )
+        }
+    }
+}
+
+struct Tomoe: View {
+    let irisSize: CGFloat
+    let color: Color
+
+    var body: some View {
+        let headSize = irisSize * 0.16
+        let tailWidth = irisSize * 0.12
+        let tailHeight = irisSize * 0.36
+
+        ZStack {
+            Capsule()
+                .fill(color)
+                .frame(width: tailWidth, height: tailHeight)
+                .offset(y: -irisSize * 0.02)
+
+            Circle()
+                .fill(color)
+                .frame(width: headSize, height: headSize)
+                .offset(y: -irisSize * 0.28)
         }
     }
 }
