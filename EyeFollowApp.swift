@@ -181,23 +181,44 @@ struct FixedIrisPupil: View {
     let pupilOffset: CGPoint
 
     var body: some View {
-        let irisColor = Color(red: 0.75, green: 0.05, blue: 0.05)
-        let outerRingWidth = irisSize * 0.08
+        let irisDark = Color(red: 0.45, green: 0.02, blue: 0.02)
+        let irisMid = Color(red: 0.8, green: 0.05, blue: 0.05)
+        let irisBright = Color(red: 0.95, green: 0.1, blue: 0.1)
+        let outerRingWidth = irisSize * 0.06
         let innerRingWidth = irisSize * 0.03
-        let innerRingScale: CGFloat = 0.6
-        let tomoeRadius = irisSize * 0.28
-        let tomoeRotation = Angle.degrees(10)
+        let innerRingScale = min(0.65, max(0.42, pupilRatio + 0.12))
+        let tickCount = 36
+        let tickBaseRadius = irisSize * 0.18
+        let tickWidth = irisSize * 0.012
+        let tickLong = irisSize * 0.12
+        let tickShort = irisSize * 0.08
+        let tomoeRadius = irisSize * 0.26
+        let tomoeRotation = Angle.degrees(0)
 
         ZStack {
             ZStack {
-                // Sharingan iris
+                // Sharingan iris base
                 Circle()
-                    .fill(irisColor)
+                    .fill(
+                        RadialGradient(
+                            gradient: Gradient(colors: [irisBright, irisMid, irisDark]),
+                            center: .center,
+                            startRadius: 0,
+                            endRadius: irisSize * 0.52
+                        )
+                    )
                     .frame(width: irisSize, height: irisSize)
 
-                Circle()
-                    .strokeBorder(Color.black, lineWidth: outerRingWidth)
-                    .frame(width: irisSize, height: irisSize)
+                ForEach(0..<tickCount, id: \.self) { i in
+                    let isLong = i % 2 == 0
+                    Capsule()
+                        .fill(Color.black.opacity(isLong ? 0.55 : 0.35))
+                        .frame(width: tickWidth, height: isLong ? tickLong : tickShort)
+                        .offset(y: -tickBaseRadius)
+                        .rotationEffect(
+                            Angle.degrees(Double(i) * (360.0 / Double(tickCount)))
+                        )
+                }
 
                 Circle()
                     .strokeBorder(Color.black.opacity(0.85), lineWidth: innerRingWidth)
@@ -205,12 +226,14 @@ struct FixedIrisPupil: View {
                     .scaleEffect(innerRingScale)
 
                 ForEach(0..<3, id: \.self) { i in
-                    ZStack {
-                        Tomoe(irisSize: irisSize, color: .black)
-                            .offset(y: -tomoeRadius)
-                    }
-                    .rotationEffect(Angle.degrees(Double(i) * 120) + tomoeRotation)
+                    Tomoe(irisSize: irisSize, color: .black)
+                        .offset(y: -tomoeRadius)
+                        .rotationEffect(Angle.degrees(Double(i) * 120) + tomoeRotation)
                 }
+
+                Circle()
+                    .strokeBorder(Color.black, lineWidth: outerRingWidth)
+                    .frame(width: irisSize, height: irisSize)
             }
             .frame(width: irisSize, height: irisSize)
             .clipShape(Circle())
@@ -240,20 +263,20 @@ struct Tomoe: View {
     let color: Color
 
     var body: some View {
-        let headSize = irisSize * 0.16
-        let tailWidth = irisSize * 0.12
-        let tailHeight = irisSize * 0.36
+        let headSize = irisSize * 0.14
+        let tailWidth = irisSize * 0.1
+        let tailHeight = irisSize * 0.28
 
         ZStack {
             Capsule()
                 .fill(color)
                 .frame(width: tailWidth, height: tailHeight)
-                .offset(y: -irisSize * 0.02)
+                .offset(y: -irisSize * 0.01)
 
             Circle()
                 .fill(color)
                 .frame(width: headSize, height: headSize)
-                .offset(y: -irisSize * 0.28)
+                .offset(y: -irisSize * 0.23)
         }
     }
 }
