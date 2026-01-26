@@ -39,6 +39,9 @@ struct PupilsFixedIrisView: View {
 
     @State private var displayedCenter: CGPoint? = nil
     @State private var displayedFaceWidthN: CGFloat = 0
+    @State private var blinkAmount: CGFloat = 1
+    @State private var blinkTimer: Timer? = nil
+    @State private var isBlinkingActive: Bool = false
 
     private let deadbandPx: CGFloat = 10
     private let smoothingPos: CGFloat = 0.18
@@ -123,7 +126,8 @@ struct PupilsFixedIrisView: View {
                 irisSize: irisSizePx,
                 pupilRatio: pupilRatio,
                 irisOffset: irisOffset,
-                pupilOffset: pupilOffset
+                pupilOffset: pupilOffset,
+                blinkAmount: blinkAmount
             )
             .position(leftEye)
             .animation(.spring(response: 0.22, dampingFraction: 0.82), value: pupilRatio)
@@ -132,11 +136,14 @@ struct PupilsFixedIrisView: View {
                 irisSize: irisSizePx,
                 pupilRatio: pupilRatio,
                 irisOffset: irisOffset,
-                pupilOffset: pupilOffset
+                pupilOffset: pupilOffset,
+                blinkAmount: blinkAmount
             )
             .position(rightEye)
             .animation(.spring(response: 0.22, dampingFraction: 0.82), value: pupilRatio)
         }
+        .onAppear { self.startBlinking() }
+        .onDisappear { self.stopBlinking() }
     }
 
     private func updateDisplayed(center: CGPoint?, faceWidthN: CGFloat?) {
@@ -172,6 +179,46 @@ struct PupilsFixedIrisView: View {
         if maxV <= minV { return 0 }
         return clamp((v - minV) / (maxV - minV), 0, 1)
     }
+
+    private func startBlinking() {
+        guard !isBlinkingActive else { return }
+        isBlinkingActive = true
+        scheduleNextBlink()
+    }
+
+    private func stopBlinking() {
+        isBlinkingActive = false
+        blinkTimer?.invalidate()
+        blinkTimer = nil
+        blinkAmount = 1
+    }
+
+    private func scheduleNextBlink() {
+        guard isBlinkingActive else { return }
+        blinkTimer?.invalidate()
+        let interval = Double.random(in: 2.4...5.2)
+        blinkTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { _ in
+            self.performBlink()
+        }
+    }
+
+    private func performBlink() {
+        guard isBlinkingActive else { return }
+        let closeDuration = 0.08
+        let openDuration = 0.12
+        withAnimation(.easeIn(duration: closeDuration)) {
+            blinkAmount = 0.1
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + closeDuration) {
+            guard self.isBlinkingActive else { return }
+            withAnimation(.easeOut(duration: openDuration)) {
+                self.blinkAmount = 1
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + openDuration) {
+                self.scheduleNextBlink()
+            }
+        }
+    }
 }
 
 struct FixedIrisPupil: View {
@@ -179,6 +226,7 @@ struct FixedIrisPupil: View {
     let pupilRatio: CGFloat   // 0..1 relative (we use as fraction of iris)
     let irisOffset: CGPoint
     let pupilOffset: CGPoint
+    let blinkAmount: CGFloat
 
     var body: some View {
         ZStack {
@@ -204,6 +252,12 @@ struct FixedIrisPupil: View {
                     y: irisOffset.y + pupilOffset.y - irisSize * 0.18
                 )
         }
+        .frame(width: irisSize, height: irisSize)
+        .mask(
+            Capsule()
+                .frame(width: irisSize, height: irisSize)
+                .scaleEffect(x: 1, y: max(blinkAmount, 0.08), anchor: .center)
+        )
     }
 }
 
