@@ -25,6 +25,38 @@ struct ContentView: View {
                 hasFace: tracker.hasFace
             )
             .ignoresSafeArea()
+
+            VStack {
+                HStack(spacing: 12) {
+                    Button {
+                        tracker.requestEnrollment()
+                    } label: {
+                        Text(tracker.isEnrolled ? "Yüz Kaydedildi" : "Yüzümü Kaydet")
+                            .foregroundColor(.white)
+                    }
+
+                    Button {
+                        tracker.clearEnrollment()
+                    } label: {
+                        Text("Sıfırla")
+                            .foregroundColor(.white)
+                    }
+                    .opacity(tracker.isEnrolled ? 1 : 0.4)
+                    .disabled(!tracker.isEnrolled)
+                }
+                .font(.footnote.weight(.semibold))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(Color.black.opacity(0.6))
+                .clipShape(Capsule())
+                .overlay(
+                    Capsule().stroke(Color.white.opacity(0.2), lineWidth: 1)
+                )
+                Spacer()
+            }
+            .padding(.top, 12)
+            .padding(.leading, 12)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
         .onAppear { tracker.start() }
         .onDisappear { tracker.stop() }
@@ -334,19 +366,28 @@ struct FaceBoxOverlay: View {
 // MARK: - FaceTracker (Vision)
 
 final class FaceTracker: NSObject, ObservableObject {
+    private struct FaceCandidate {
+        let boundingBox: CGRect
+        let faceprint: VNFeaturePrintObservation?
+    }
+
     let session = AVCaptureSession()
     private let videoOutput = AVCaptureVideoDataOutput()
     private let visionQueue = DispatchQueue(label: "vision.queue")
     private var lockedFaceBox: CGRect? = nil
     private var missingFrames: Int = 0
+    private var pendingEnrollment: Bool = false
+    private var enrolledFaceprint: VNFeaturePrintObservation? = nil
 
     private let lockIoUThreshold: CGFloat = 0.06
     private let lockCenterThreshold: CGFloat = 0.35
     private let lockHoldFrames: Int = 3
     private let lockReleaseFrames: Int = 12
+    private let matchDistanceThreshold: Float = 0.35
 
     @Published var faceBoxNormalized: CGRect? = nil
     @Published var hasFace: Bool = false
+    @Published var isEnrolled: Bool = false
 
     func start() {
         configureSessionIfNeeded()
@@ -354,6 +395,30 @@ final class FaceTracker: NSObject, ObservableObject {
     }
 
     func stop() { session.stopRunning() }
+
+    func requestEnrollment() {
+        visionQueue.async {
+            self.pendingEnrollment = true
+            self.enrolledFaceprint = nil
+            self.lockedFaceBox = nil
+            self.missingFrames = 0
+        }
+        DispatchQueue.main.async {
+            self.isEnrolled = false
+        }
+    }
+
+    func clearEnrollment() {
+        visionQueue.async {
+            self.pendingEnrollment = false
+            self.enrolledFaceprint = nil
+            self.lockedFaceBox = nil
+            self.missingFrames = 0
+        }
+        DispatchQueue.main.async {
+            self.isEnrolled = false
+        }
+    }
 
     private func configureSessionIfNeeded() {
         guard session.inputs.isEmpty else { return }
@@ -397,35 +462,136 @@ extension FaceTracker: AVCaptureVideoDataOutputSampleBufferDelegate {
 
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
 
-        let request = VNDetectFaceRectanglesRequest { [weak self] req, err in
-            guard let self else { return }
-            guard err == nil else { return }
-
-            let faces = (req.results as? [VNFaceObservation]) ?? []
-            let selected = self.selectLockedFace(from: faces)
-
-            DispatchQueue.main.async {
-                if let selected {
-                    self.faceBoxNormalized = selected
-                    self.hasFace = true
-                } else {
-                    self.faceBoxNormalized = nil
-                    self.hasFace = false
-                }
-            }
-        }
-
+        let detectRequest = VNDetectFaceRectanglesRequest()
         let handler = VNImageRequestHandler(
             cvPixelBuffer: pixelBuffer,
             orientation: .rightMirrored,
             options: [:]
         )
 
-        do { try handler.perform([request]) } catch { }
+        do {
+            try handler.perform([detectRequest])
+        } catch {
+            return
+        }
+
+        let faces = (detectRequest.results as? [VNFaceObservation]) ?? []
+        let candidates = makeCandidates(from: faces, pixelBuffer: pixelBuffer)
+        tryEnrollIfNeeded(from: candidates)
+        let selected = selectLockedFace(from: candidates)
+
+        DispatchQueue.main.async {
+            if let selected {
+                self.faceBoxNormalized = selected
+                self.hasFace = true
+            } else {
+                self.faceBoxNormalized = nil
+                self.hasFace = false
+            }
+        }
     }
 
-    private func selectLockedFace(from faces: [VNFaceObservation]) -> CGRect? {
-        let boxes = faces.map { $0.boundingBox }
+    private func makeCandidates(from faces: [VNFaceObservation],
+                                pixelBuffer: CVPixelBuffer) -> [FaceCandidate] {
+        guard !faces.isEmpty else { return [] }
+
+        if enrolledFaceprint != nil || pendingEnrollment {
+            if #available(iOS 13.0, *) {
+                let faceprintRequest = VNGenerateFaceprintRequest()
+                faceprintRequest.inputFaceObservations = faces
+
+                let faceprintHandler = VNImageRequestHandler(
+                    cvPixelBuffer: pixelBuffer,
+                    orientation: .rightMirrored,
+                    options: [:]
+                )
+
+                do {
+                    try faceprintHandler.perform([faceprintRequest])
+                } catch {
+                    return faces.map { FaceCandidate(boundingBox: $0.boundingBox, faceprint: nil) }
+                }
+
+                let faceprintFaces = (faceprintRequest.results as? [VNFaceObservation]) ?? []
+                let withPrints = faceprintFaces.compactMap { observation -> FaceCandidate? in
+                    guard let faceprint = observation.faceprint else { return nil }
+                    return FaceCandidate(boundingBox: observation.boundingBox, faceprint: faceprint)
+                }
+                if !withPrints.isEmpty {
+                    return withPrints
+                }
+            }
+        }
+
+        return faces.map { FaceCandidate(boundingBox: $0.boundingBox, faceprint: nil) }
+    }
+
+    private func tryEnrollIfNeeded(from candidates: [FaceCandidate]) {
+        guard pendingEnrollment else { return }
+        guard let candidate = candidates.max(by: { area($0.boundingBox) < area($1.boundingBox) }) else { return }
+        guard let faceprint = candidate.faceprint else { return }
+
+        enrolledFaceprint = faceprint
+        pendingEnrollment = false
+        lockedFaceBox = candidate.boundingBox
+        missingFrames = 0
+
+        DispatchQueue.main.async {
+            self.isEnrolled = true
+        }
+    }
+
+    private func selectLockedFace(from candidates: [FaceCandidate]) -> CGRect? {
+        if let enrolledFaceprint {
+            return selectMatchingFace(enrolledFaceprint, from: candidates)
+        }
+        return selectAutoFace(from: candidates)
+    }
+
+    private func selectMatchingFace(_ enrolled: VNFeaturePrintObservation,
+                                    from candidates: [FaceCandidate]) -> CGRect? {
+        guard !candidates.isEmpty else {
+            missingFrames += 1
+            if missingFrames <= lockHoldFrames {
+                return lockedFaceBox
+            }
+            lockedFaceBox = nil
+            return nil
+        }
+
+        var bestCandidate: FaceCandidate? = nil
+        var bestDistance: Float = .greatestFiniteMagnitude
+
+        for candidate in candidates {
+            guard let faceprint = candidate.faceprint else { continue }
+            var distance: Float = 0
+            do {
+                try enrolled.computeDistance(&distance, to: faceprint)
+            } catch {
+                continue
+            }
+            if distance < bestDistance {
+                bestDistance = distance
+                bestCandidate = candidate
+            }
+        }
+
+        if let bestCandidate, bestDistance <= matchDistanceThreshold {
+            lockedFaceBox = bestCandidate.boundingBox
+            missingFrames = 0
+            return bestCandidate.boundingBox
+        }
+
+        missingFrames += 1
+        if missingFrames <= lockHoldFrames {
+            return lockedFaceBox
+        }
+        lockedFaceBox = nil
+        return nil
+    }
+
+    private func selectAutoFace(from candidates: [FaceCandidate]) -> CGRect? {
+        let boxes = candidates.map { $0.boundingBox }
         guard !boxes.isEmpty else {
             missingFrames += 1
             if missingFrames <= lockHoldFrames {
