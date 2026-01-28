@@ -376,6 +376,7 @@ final class FaceTracker: NSObject, ObservableObject {
     private let visionQueue = DispatchQueue(label: "vision.queue")
     private var lockedFaceBox: CGRect? = nil
     private var missingFrames: Int = 0
+    private var pendingMatchFrames: Int = 0
     private var pendingEnrollment: Bool = false
     private var enrolledSignature: [CGFloat]? = nil
 
@@ -383,7 +384,8 @@ final class FaceTracker: NSObject, ObservableObject {
     private let lockCenterThreshold: CGFloat = 0.35
     private let lockHoldFrames: Int = 3
     private let lockReleaseFrames: Int = 12
-    private let matchDistanceThreshold: CGFloat = 0.24
+    private let matchDistanceThreshold: CGFloat = 0.22
+    private let requiredMatchFrames: Int = 3
 
     @Published var faceBoxNormalized: CGRect? = nil
     @Published var hasFace: Bool = false
@@ -402,6 +404,7 @@ final class FaceTracker: NSObject, ObservableObject {
             self.enrolledSignature = nil
             self.lockedFaceBox = nil
             self.missingFrames = 0
+            self.pendingMatchFrames = 0
         }
         DispatchQueue.main.async {
             self.isEnrolled = false
@@ -414,6 +417,7 @@ final class FaceTracker: NSObject, ObservableObject {
             self.enrolledSignature = nil
             self.lockedFaceBox = nil
             self.missingFrames = 0
+            self.pendingMatchFrames = 0
         }
         DispatchQueue.main.async {
             self.isEnrolled = false
@@ -529,6 +533,7 @@ extension FaceTracker: AVCaptureVideoDataOutputSampleBufferDelegate {
                 return lockedFaceBox
             }
             lockedFaceBox = nil
+            pendingMatchFrames = 0
             return nil
         }
 
@@ -544,17 +549,43 @@ extension FaceTracker: AVCaptureVideoDataOutputSampleBufferDelegate {
             }
         }
 
-        if let bestCandidate, bestDistance <= matchDistanceThreshold {
+        guard let bestCandidate, bestDistance <= matchDistanceThreshold else {
+            pendingMatchFrames = 0
+            missingFrames += 1
+            if missingFrames <= lockHoldFrames {
+                return lockedFaceBox
+            }
+            lockedFaceBox = nil
+            return nil
+        }
+
+        if let locked = lockedFaceBox {
+            let bestIoU = iou(locked, bestCandidate.boundingBox)
+            let bestDist = centerDistance(locked, bestCandidate.boundingBox)
+            if bestIoU >= lockIoUThreshold || bestDist <= lockCenterThreshold {
+                lockedFaceBox = bestCandidate.boundingBox
+                missingFrames = 0
+                pendingMatchFrames = 0
+                return bestCandidate.boundingBox
+            }
+
+            missingFrames += 1
+            if missingFrames <= lockHoldFrames {
+                return lockedFaceBox
+            }
+            lockedFaceBox = nil
+            pendingMatchFrames = 0
+            return nil
+        }
+
+        pendingMatchFrames += 1
+        if pendingMatchFrames >= requiredMatchFrames {
             lockedFaceBox = bestCandidate.boundingBox
             missingFrames = 0
+            pendingMatchFrames = 0
             return bestCandidate.boundingBox
         }
 
-        missingFrames += 1
-        if missingFrames <= lockHoldFrames {
-            return lockedFaceBox
-        }
-        lockedFaceBox = nil
         return nil
     }
 
