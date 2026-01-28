@@ -368,7 +368,7 @@ struct FaceBoxOverlay: View {
 final class FaceTracker: NSObject, ObservableObject {
     private struct FaceCandidate {
         let boundingBox: CGRect
-        let faceprint: VNFeaturePrintObservation?
+        let signature: [CGFloat]?
     }
 
     let session = AVCaptureSession()
@@ -377,13 +377,13 @@ final class FaceTracker: NSObject, ObservableObject {
     private var lockedFaceBox: CGRect? = nil
     private var missingFrames: Int = 0
     private var pendingEnrollment: Bool = false
-    private var enrolledFaceprint: VNFeaturePrintObservation? = nil
+    private var enrolledSignature: [CGFloat]? = nil
 
     private let lockIoUThreshold: CGFloat = 0.06
     private let lockCenterThreshold: CGFloat = 0.35
     private let lockHoldFrames: Int = 3
     private let lockReleaseFrames: Int = 12
-    private let matchDistanceThreshold: Float = 0.35
+    private let matchDistanceThreshold: CGFloat = 0.24
 
     @Published var faceBoxNormalized: CGRect? = nil
     @Published var hasFace: Bool = false
@@ -399,7 +399,7 @@ final class FaceTracker: NSObject, ObservableObject {
     func requestEnrollment() {
         visionQueue.async {
             self.pendingEnrollment = true
-            self.enrolledFaceprint = nil
+            self.enrolledSignature = nil
             self.lockedFaceBox = nil
             self.missingFrames = 0
         }
@@ -411,7 +411,7 @@ final class FaceTracker: NSObject, ObservableObject {
     func clearEnrollment() {
         visionQueue.async {
             self.pendingEnrollment = false
-            self.enrolledFaceprint = nil
+            self.enrolledSignature = nil
             self.lockedFaceBox = nil
             self.missingFrames = 0
         }
@@ -462,7 +462,7 @@ extension FaceTracker: AVCaptureVideoDataOutputSampleBufferDelegate {
 
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
 
-        let detectRequest = VNDetectFaceRectanglesRequest()
+        let landmarksRequest = VNDetectFaceLandmarksRequest()
         let handler = VNImageRequestHandler(
             cvPixelBuffer: pixelBuffer,
             orientation: .rightMirrored,
@@ -470,13 +470,13 @@ extension FaceTracker: AVCaptureVideoDataOutputSampleBufferDelegate {
         )
 
         do {
-            try handler.perform([detectRequest])
+            try handler.perform([landmarksRequest])
         } catch {
             return
         }
 
-        let faces = (detectRequest.results as? [VNFaceObservation]) ?? []
-        let candidates = makeCandidates(from: faces, pixelBuffer: pixelBuffer)
+        let faces = (landmarksRequest.results as? [VNFaceObservation]) ?? []
+        let candidates = makeCandidates(from: faces)
         tryEnrollIfNeeded(from: candidates)
         let selected = selectLockedFace(from: candidates)
 
@@ -491,47 +491,20 @@ extension FaceTracker: AVCaptureVideoDataOutputSampleBufferDelegate {
         }
     }
 
-    private func makeCandidates(from faces: [VNFaceObservation],
-                                pixelBuffer: CVPixelBuffer) -> [FaceCandidate] {
+    private func makeCandidates(from faces: [VNFaceObservation]) -> [FaceCandidate] {
         guard !faces.isEmpty else { return [] }
-
-        if enrolledFaceprint != nil || pendingEnrollment {
-            if #available(iOS 13.0, *) {
-                let faceprintRequest = VNGenerateFaceprintRequest()
-                faceprintRequest.inputFaceObservations = faces
-
-                let faceprintHandler = VNImageRequestHandler(
-                    cvPixelBuffer: pixelBuffer,
-                    orientation: .rightMirrored,
-                    options: [:]
-                )
-
-                do {
-                    try faceprintHandler.perform([faceprintRequest])
-                } catch {
-                    return faces.map { FaceCandidate(boundingBox: $0.boundingBox, faceprint: nil) }
-                }
-
-                let faceprintFaces = (faceprintRequest.results as? [VNFaceObservation]) ?? []
-                let withPrints = faceprintFaces.compactMap { observation -> FaceCandidate? in
-                    guard let faceprint = observation.faceprint else { return nil }
-                    return FaceCandidate(boundingBox: observation.boundingBox, faceprint: faceprint)
-                }
-                if !withPrints.isEmpty {
-                    return withPrints
-                }
-            }
+        return faces.map {
+            FaceCandidate(boundingBox: $0.boundingBox,
+                          signature: makeSignature(from: $0.landmarks))
         }
-
-        return faces.map { FaceCandidate(boundingBox: $0.boundingBox, faceprint: nil) }
     }
 
     private func tryEnrollIfNeeded(from candidates: [FaceCandidate]) {
         guard pendingEnrollment else { return }
         guard let candidate = candidates.max(by: { area($0.boundingBox) < area($1.boundingBox) }) else { return }
-        guard let faceprint = candidate.faceprint else { return }
+        guard let signature = candidate.signature else { return }
 
-        enrolledFaceprint = faceprint
+        enrolledSignature = signature
         pendingEnrollment = false
         lockedFaceBox = candidate.boundingBox
         missingFrames = 0
@@ -542,13 +515,13 @@ extension FaceTracker: AVCaptureVideoDataOutputSampleBufferDelegate {
     }
 
     private func selectLockedFace(from candidates: [FaceCandidate]) -> CGRect? {
-        if let enrolledFaceprint {
-            return selectMatchingFace(enrolledFaceprint, from: candidates)
+        if let enrolledSignature {
+            return selectMatchingFace(enrolledSignature, from: candidates)
         }
         return selectAutoFace(from: candidates)
     }
 
-    private func selectMatchingFace(_ enrolled: VNFeaturePrintObservation,
+    private func selectMatchingFace(_ enrolled: [CGFloat],
                                     from candidates: [FaceCandidate]) -> CGRect? {
         guard !candidates.isEmpty else {
             missingFrames += 1
@@ -560,16 +533,11 @@ extension FaceTracker: AVCaptureVideoDataOutputSampleBufferDelegate {
         }
 
         var bestCandidate: FaceCandidate? = nil
-        var bestDistance: Float = .greatestFiniteMagnitude
+        var bestDistance: CGFloat = .greatestFiniteMagnitude
 
         for candidate in candidates {
-            guard let faceprint = candidate.faceprint else { continue }
-            var distance: Float = 0
-            do {
-                try enrolled.computeDistance(&distance, to: faceprint)
-            } catch {
-                continue
-            }
+            guard let signature = candidate.signature else { continue }
+            let distance = signatureDistance(enrolled, signature)
             if distance < bestDistance {
                 bestDistance = distance
                 bestCandidate = candidate
@@ -628,6 +596,59 @@ extension FaceTracker: AVCaptureVideoDataOutputSampleBufferDelegate {
         lockedFaceBox = best
         missingFrames = 0
         return best
+    }
+
+    private func makeSignature(from landmarks: VNFaceLandmarks2D?) -> [CGFloat]? {
+        guard let landmarks else { return nil }
+        let nosePoint = averagePoint(landmarks.nose) ?? averagePoint(landmarks.noseCrest)
+        let mouthPoint = averagePoint(landmarks.outerLips) ?? averagePoint(landmarks.innerLips)
+
+        guard let leftEye = averagePoint(landmarks.leftEye),
+              let rightEye = averagePoint(landmarks.rightEye),
+              let nose = nosePoint,
+              let mouth = mouthPoint else {
+            return nil
+        }
+
+        let eyeMid = CGPoint(x: (leftEye.x + rightEye.x) / 2,
+                             y: (leftEye.y + rightEye.y) / 2)
+        let eyeDistance = hypot(rightEye.x - leftEye.x, rightEye.y - leftEye.y)
+        let noseMouthDistance = hypot(mouth.x - nose.x, mouth.y - nose.y)
+        let eyeMouthDistance = hypot(mouth.x - eyeMid.x, mouth.y - eyeMid.y)
+        let noseEyeDistance = hypot(nose.x - eyeMid.x, nose.y - eyeMid.y)
+
+        return [
+            leftEye.x, leftEye.y,
+            rightEye.x, rightEye.y,
+            nose.x, nose.y,
+            mouth.x, mouth.y,
+            eyeDistance, noseMouthDistance,
+            eyeMouthDistance, noseEyeDistance
+        ]
+    }
+
+    private func averagePoint(_ region: VNFaceLandmarkRegion2D?) -> CGPoint? {
+        guard let region else { return nil }
+        let points = region.normalizedPoints
+        guard !points.isEmpty else { return nil }
+        var sumX: CGFloat = 0
+        var sumY: CGFloat = 0
+        for point in points {
+            sumX += point.x
+            sumY += point.y
+        }
+        let count = CGFloat(points.count)
+        return CGPoint(x: sumX / count, y: sumY / count)
+    }
+
+    private func signatureDistance(_ a: [CGFloat], _ b: [CGFloat]) -> CGFloat {
+        guard a.count == b.count, !a.isEmpty else { return .greatestFiniteMagnitude }
+        var sum: CGFloat = 0
+        for idx in 0..<a.count {
+            let diff = a[idx] - b[idx]
+            sum += diff * diff
+        }
+        return sqrt(sum / CGFloat(a.count))
     }
 
     private func area(_ rect: CGRect) -> CGFloat {
