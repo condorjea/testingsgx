@@ -39,6 +39,8 @@ struct PupilsFixedIrisView: View {
 
     @State private var displayedCenter: CGPoint? = nil
     @State private var displayedFaceWidthN: CGFloat = 0
+    @State private var glowPulse: CGFloat = 0
+    @State private var isPulsing: Bool = false
 
     private let deadbandPx: CGFloat = 10
     private let smoothingPos: CGFloat = 0.18
@@ -59,10 +61,14 @@ struct PupilsFixedIrisView: View {
     private let faceWMax: CGFloat = 0.45
 
     // Gerçekçilik için hareket katsayıları
-    private let irisMaxOffsetPx: CGFloat = 8
     private let pupilEdgePadding: CGFloat = 4
     private let verticalGain: CGFloat = 0.6
     private let headFollowGain: CGFloat = 0.25
+    private let eyeWidthScale: CGFloat = 1.6
+    private let eyeHeightScale: CGFloat = 0.65
+    private let eyeSlantScale: CGFloat = 0.12
+    private let irisOffsetScale: CGFloat = 0.08
+    private let pulseDuration: Double = 2.6
 
     var body: some View {
         GeometryReader { geo in
@@ -98,21 +104,26 @@ struct PupilsFixedIrisView: View {
             let ny = clamp((faceCenter.y - screenCenter.y) / (H / 2), -1, 1) * verticalGain
             let gaze = CGPoint(x: nx, y: ny)
 
+            let eyeWidth = irisSizePx * eyeWidthScale
+            let eyeHeight = irisSizePx * eyeHeightScale
+            let eyeSize = CGSize(width: eyeWidth, height: eyeHeight)
+            let eyeSlant = eyeHeight * eyeSlantScale
+
             let irisOffset = CGPoint(
-                x: gaze.x * irisMaxOffsetPx,
-                y: gaze.y * irisMaxOffsetPx
+                x: gaze.x * eyeHeight * irisOffsetScale,
+                y: gaze.y * eyeHeight * irisOffsetScale
             )
 
             // yakınlık -> pupil ratio (siyah iç kısım büyür/küçülür)
             let t = normalize(displayedFaceWidthN, faceWMin, faceWMax)
             let pupilRatio = lerp(pupilMinRatio, pupilMaxRatio, t)
 
-            let irisRadius = irisSizePx / 2
-            let pupilRadius = (irisSizePx * pupilRatio) / 2
-            let maxPupilOffset = max(0, irisRadius - pupilRadius - pupilEdgePadding)
+            let pupilSize = eyeHeight * pupilRatio
+            let maxPupilOffsetX = max(0, eyeWidth / 2 - pupilSize / 2 - pupilEdgePadding)
+            let maxPupilOffsetY = max(0, eyeHeight / 2 - pupilSize / 2 - pupilEdgePadding)
             let pupilOffset = CGPoint(
-                x: gaze.x * maxPupilOffset,
-                y: gaze.y * maxPupilOffset
+                x: gaze.x * maxPupilOffsetX,
+                y: gaze.y * maxPupilOffsetY
             )
 
             // sabit mesafe + az head hareketi
@@ -120,23 +131,29 @@ struct PupilsFixedIrisView: View {
             let rightEye = CGPoint(x: headCenter.x + interEyeDistancePx / 2, y: headCenter.y)
 
             FixedIrisPupil(
-                irisSize: irisSizePx,
+                eyeSize: eyeSize,
                 pupilRatio: pupilRatio,
                 irisOffset: irisOffset,
-                pupilOffset: pupilOffset
+                pupilOffset: pupilOffset,
+                slant: -eyeSlant,
+                glowPulse: glowPulse
             )
             .position(leftEye)
             .animation(.spring(response: 0.22, dampingFraction: 0.82), value: pupilRatio)
 
             FixedIrisPupil(
-                irisSize: irisSizePx,
+                eyeSize: eyeSize,
                 pupilRatio: pupilRatio,
                 irisOffset: irisOffset,
-                pupilOffset: pupilOffset
+                pupilOffset: pupilOffset,
+                slant: eyeSlant,
+                glowPulse: glowPulse
             )
             .position(rightEye)
             .animation(.spring(response: 0.22, dampingFraction: 0.82), value: pupilRatio)
         }
+        .onAppear { startPulse() }
+        .onDisappear { stopPulse() }
     }
 
     private func updateDisplayed(center: CGPoint?, faceWidthN: CGFloat?) {
@@ -172,38 +189,121 @@ struct PupilsFixedIrisView: View {
         if maxV <= minV { return 0 }
         return clamp((v - minV) / (maxV - minV), 0, 1)
     }
+
+    private func startPulse() {
+        guard !isPulsing else { return }
+        isPulsing = true
+        glowPulse = 0
+        withAnimation(.easeInOut(duration: pulseDuration).repeatForever(autoreverses: true)) {
+            glowPulse = 1
+        }
+    }
+
+    private func stopPulse() {
+        isPulsing = false
+        glowPulse = 0
+    }
 }
 
 struct FixedIrisPupil: View {
-    let irisSize: CGFloat
+    let eyeSize: CGSize
     let pupilRatio: CGFloat   // 0..1 relative (we use as fraction of iris)
     let irisOffset: CGPoint
     let pupilOffset: CGPoint
+    let slant: CGFloat
+    let glowPulse: CGFloat
 
     var body: some View {
+        let baseColor = Color(red: 0.08, green: 0.6, blue: 1.0)
+        let brightColor = Color(red: 0.25, green: 0.85, blue: 1.0)
+        let glowColor = Color(red: 0.1, green: 0.5, blue: 1.0)
+        let shape = EyeShape(slant: slant, openness: 0.85)
+        let pupilSize = eyeSize.height * pupilRatio
+        let highlightSize = pupilSize * 0.35
+        let glowOpacity: CGFloat = 0.35 + 0.25 * glowPulse
+        let strokeOpacity: CGFloat = 0.8 + 0.2 * glowPulse
+        let shadowOpacity: CGFloat = 0.6 + 0.4 * glowPulse
+
         ZStack {
-            // iris çok az hareket eder
-            Circle()
-                .fill(Color.blue.opacity(0.9))
-                .frame(width: irisSize, height: irisSize)
-                .offset(x: irisOffset.x, y: irisOffset.y)
+            shape
+                .fill(glowColor.opacity(Double(glowOpacity)))
+                .frame(width: eyeSize.width, height: eyeSize.height)
+                .blur(radius: 10 + 6 * glowPulse)
 
-            // pupil daha fazla hareket eder
-            Circle()
-                .fill(Color.black)
-                .frame(width: irisSize * pupilRatio, height: irisSize * pupilRatio)
-                .offset(x: irisOffset.x + pupilOffset.x,
-                        y: irisOffset.y + pupilOffset.y)
-
-            // highlight pupil ile beraber kayar
-            Circle()
-                .fill(Color.white.opacity(0.85))
-                .frame(width: irisSize * 0.18, height: irisSize * 0.18)
-                .offset(
-                    x: irisOffset.x + pupilOffset.x - irisSize * 0.18,
-                    y: irisOffset.y + pupilOffset.y - irisSize * 0.18
+            shape
+                .fill(
+                    LinearGradient(
+                        gradient: Gradient(colors: [brightColor, baseColor]),
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
                 )
+                .frame(width: eyeSize.width, height: eyeSize.height)
+                .overlay(
+                    shape
+                        .stroke(glowColor.opacity(Double(strokeOpacity)),
+                                lineWidth: eyeSize.height * 0.08)
+                )
+                .shadow(color: glowColor.opacity(Double(shadowOpacity)),
+                        radius: 10 + 8 * glowPulse)
+
+            ZStack {
+                Circle()
+                    .fill(
+                        RadialGradient(
+                            gradient: Gradient(colors: [Color.white.opacity(0.35), Color.clear]),
+                            center: .center,
+                            startRadius: 0,
+                            endRadius: eyeSize.height * 0.55
+                        )
+                    )
+                    .frame(width: eyeSize.height * 0.9, height: eyeSize.height * 0.9)
+                    .offset(x: irisOffset.x * 0.6, y: irisOffset.y * 0.6)
+
+                Circle()
+                    .fill(Color.black)
+                    .frame(width: pupilSize, height: pupilSize)
+                    .offset(x: irisOffset.x + pupilOffset.x,
+                            y: irisOffset.y + pupilOffset.y)
+
+                Circle()
+                    .fill(Color.white.opacity(0.8))
+                    .frame(width: highlightSize, height: highlightSize)
+                    .offset(
+                        x: irisOffset.x + pupilOffset.x - highlightSize * 0.6,
+                        y: irisOffset.y + pupilOffset.y - highlightSize * 0.6
+                    )
+            }
+            .frame(width: eyeSize.width, height: eyeSize.height)
+            .mask(shape)
         }
+        .frame(width: eyeSize.width, height: eyeSize.height)
+    }
+}
+
+struct EyeShape: Shape {
+    var slant: CGFloat
+    var openness: CGFloat
+
+    func path(in rect: CGRect) -> Path {
+        let clamped = min(max(openness, 0.2), 1.0)
+        let height = rect.height * clamped
+        let centerY = rect.midY
+        let topY = centerY - height / 2
+        let bottomY = centerY + height / 2
+
+        let left = CGPoint(x: rect.minX, y: centerY + slant)
+        let right = CGPoint(x: rect.maxX, y: centerY - slant)
+
+        let upperControl = CGPoint(x: rect.midX, y: topY - abs(slant) * 0.2)
+        let lowerControl = CGPoint(x: rect.midX, y: bottomY + abs(slant) * 0.2)
+
+        var path = Path()
+        path.move(to: left)
+        path.addQuadCurve(to: right, control: upperControl)
+        path.addQuadCurve(to: left, control: lowerControl)
+        path.closeSubpath()
+        return path
     }
 }
 
