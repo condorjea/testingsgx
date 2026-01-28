@@ -337,6 +337,13 @@ final class FaceTracker: NSObject, ObservableObject {
     let session = AVCaptureSession()
     private let videoOutput = AVCaptureVideoDataOutput()
     private let visionQueue = DispatchQueue(label: "vision.queue")
+    private var lockedFaceBox: CGRect? = nil
+    private var missingFrames: Int = 0
+
+    private let lockIoUThreshold: CGFloat = 0.06
+    private let lockCenterThreshold: CGFloat = 0.35
+    private let lockHoldFrames: Int = 3
+    private let lockReleaseFrames: Int = 12
 
     @Published var faceBoxNormalized: CGRect? = nil
     @Published var hasFace: Bool = false
@@ -395,17 +402,16 @@ extension FaceTracker: AVCaptureVideoDataOutputSampleBufferDelegate {
             guard err == nil else { return }
 
             let faces = (req.results as? [VNFaceObservation]) ?? []
-            guard let face = faces.first else {
-                DispatchQueue.main.async {
+            let selected = self.selectLockedFace(from: faces)
+
+            DispatchQueue.main.async {
+                if let selected {
+                    self.faceBoxNormalized = selected
+                    self.hasFace = true
+                } else {
                     self.faceBoxNormalized = nil
                     self.hasFace = false
                 }
-                return
-            }
-
-            DispatchQueue.main.async {
-                self.faceBoxNormalized = face.boundingBox
-                self.hasFace = true
             }
         }
 
@@ -416,5 +422,64 @@ extension FaceTracker: AVCaptureVideoDataOutputSampleBufferDelegate {
         )
 
         do { try handler.perform([request]) } catch { }
+    }
+
+    private func selectLockedFace(from faces: [VNFaceObservation]) -> CGRect? {
+        let boxes = faces.map { $0.boundingBox }
+        guard !boxes.isEmpty else {
+            missingFrames += 1
+            if missingFrames <= lockHoldFrames {
+                return lockedFaceBox
+            }
+            if missingFrames >= lockReleaseFrames {
+                lockedFaceBox = nil
+            }
+            return nil
+        }
+
+        if let locked = lockedFaceBox {
+            let best = boxes.min { centerDistance($0, locked) < centerDistance($1, locked) } ?? locked
+            let bestIoU = iou(locked, best)
+            let bestDist = centerDistance(locked, best)
+
+            if bestIoU >= lockIoUThreshold || bestDist <= lockCenterThreshold {
+                lockedFaceBox = best
+                missingFrames = 0
+                return best
+            }
+
+            missingFrames += 1
+            if missingFrames <= lockHoldFrames {
+                return lockedFaceBox
+            }
+            if missingFrames >= lockReleaseFrames {
+                lockedFaceBox = nil
+            }
+            return nil
+        }
+
+        let best = boxes.max { area($0) < area($1) }
+        lockedFaceBox = best
+        missingFrames = 0
+        return best
+    }
+
+    private func area(_ rect: CGRect) -> CGFloat {
+        rect.width * rect.height
+    }
+
+    private func centerDistance(_ a: CGRect, _ b: CGRect) -> CGFloat {
+        let dx = a.midX - b.midX
+        let dy = a.midY - b.midY
+        return sqrt(dx * dx + dy * dy)
+    }
+
+    private func iou(_ a: CGRect, _ b: CGRect) -> CGFloat {
+        let intersection = a.intersection(b)
+        guard !intersection.isNull else { return 0 }
+        let interArea = intersection.width * intersection.height
+        let unionArea = area(a) + area(b) - interArea
+        if unionArea <= 0 { return 0 }
+        return interArea / unionArea
     }
 }
